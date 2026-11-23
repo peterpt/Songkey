@@ -36,6 +36,31 @@ from numpy.lib.stride_tricks import as_strided
 from scipy.ndimage import median_filter, uniform_filter1d
 
 APP_NAME = "SongKey"
+FROZEN = bool(getattr(sys, "frozen", False))          # running as a PyInstaller .exe
+IS_WINDOWS = os.name == "nt"
+APP_DIR = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
+# On Windows every ffmpeg/ffprobe/ffplay call would flash a console window without this
+NO_WINDOW = {"creationflags": 0x08000000} if IS_WINDOWS else {}
+
+
+def tool(name):
+    """Full path of ffmpeg / ffprobe / ffplay: next to the app first (Windows build), then PATH."""
+    exe = name + (".exe" if IS_WINDOWS else "")
+    for d in (APP_DIR, os.path.join(APP_DIR, "ffmpeg"), getattr(sys, "_MEIPASS", "")):
+        if d and os.path.isfile(os.path.join(d, exe)):
+            return os.path.join(d, exe)
+    return shutil.which(name) or name
+
+
+def default_db_path():
+    """songs.db next to the app if that folder is writable, else in the user's data folder."""
+    if os.access(APP_DIR, os.W_OK):
+        return os.path.join(APP_DIR, "songs.db")
+    if IS_WINDOWS:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "SongKey", "songs.db")
 APP_VERSION = "1.0"
 GITHUB_URL = "https://github.com/peterpt/Songkey"
 SR = 22050                 # analysis sample rate (own engine)
@@ -126,9 +151,9 @@ def probe(path):
     info = {"duration": 0.0, "title": "", "artist": "", "album": "", "channels": 2}
     try:
         p = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries",
+            [tool("ffprobe"), "-v", "error", "-show_entries",
              "format=duration:format_tags:stream=channels,codec_type:stream_tags", "-of", "json", path],
-            capture_output=True, timeout=60)
+            capture_output=True, timeout=60, **NO_WINDOW)
         data = json.loads(p.stdout.decode("utf-8", "replace") or "{}")
         fmt = data.get("format", {})
         info["duration"] = float(fmt.get("duration") or 0)
@@ -150,10 +175,10 @@ def probe(path):
 
 
 def decode(path, sr=SR, max_seconds=MAX_SECONDS):
-    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-vn", "-sn", "-dn",
+    cmd = [tool("ffmpeg"), "-v", "error", "-nostdin", "-i", path, "-vn", "-sn", "-dn",
            "-t", str(max_seconds), "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
     try:
-        p = subprocess.run(cmd, capture_output=True)
+        p = subprocess.run(cmd, capture_output=True, **NO_WINDOW)
     except FileNotFoundError:
         raise RuntimeError("ffmpeg not found - install it: sudo apt install ffmpeg")
     if not p.stdout:
@@ -176,9 +201,9 @@ PEAK_BLOCK = WAVE_SR // PEAK_RATE    # 441 samples
 def compute_peaks(path, channels=2, max_seconds=MAX_SECONDS):
     """min / max / rms per 10 ms block for each channel -> int8 array (blocks, ch, 3)."""
     ch = 1 if channels == 1 else 2
-    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-vn", "-sn", "-dn",
+    cmd = [tool("ffmpeg"), "-v", "error", "-nostdin", "-i", path, "-vn", "-sn", "-dn",
            "-t", str(max_seconds), "-ac", str(ch), "-ar", str(WAVE_SR), "-f", "s16le", "-"]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **NO_WINDOW)
     blk_bytes = PEAK_BLOCK * ch * 2
     out, rest = [], b""
     while True:
@@ -206,11 +231,11 @@ def compute_peaks(path, channels=2, max_seconds=MAX_SECONDS):
 def load_segment(path, start, dur, channels=2):
     """Raw samples (n, ch) float32 for a short stretch of the file, for deep zoom."""
     ch = 1 if channels == 1 else 2
-    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-ss", "%.4f" % max(0.0, start), "-i", path,
+    cmd = [tool("ffmpeg"), "-v", "error", "-nostdin", "-ss", "%.4f" % max(0.0, start), "-i", path,
            "-t", "%.4f" % max(0.01, dur), "-vn", "-sn", "-dn", "-ac", str(ch), "-ar", str(WAVE_SR),
            "-f", "s16le", "-"]
     try:
-        data = subprocess.run(cmd, capture_output=True, timeout=30).stdout
+        data = subprocess.run(cmd, capture_output=True, timeout=30, **NO_WINDOW).stdout
     except Exception:
         return None
     n = len(data) // (2 * ch)
@@ -627,12 +652,14 @@ def find_cues(o, B, centers, fps, bpm):
 # ---------------------------------------------------------------------------
 def essentia_available():
     """Probe in a subprocess so an 'Illegal instruction' crash can't kill us."""
+    if FROZEN:
+        return False, "Essentia is not included in this packaged version of SongKey"
     try:
         test = ("import numpy as np, essentia.standard as es\n"
                 "x = (np.random.rand(44100 * 6).astype('float32') - 0.5) * 0.2\n"
                 "es.KeyExtractor(profileType='bgate')(x)\n"
                 "es.RhythmExtractor2013(method='multifeature')(x)\n")
-        p = subprocess.run([sys.executable, "-c", test], capture_output=True, timeout=300)
+        p = subprocess.run([sys.executable, "-c", test], capture_output=True, timeout=300, **NO_WINDOW)
     except Exception as e:
         return False, str(e)
     if p.returncode == 0:
@@ -807,8 +834,8 @@ def read_metadata(path):
           "size": st.st_size, "mtime": st.st_mtime}
     data = {}
     try:
-        p = subprocess.run(["ffprobe", "-v", "error", "-show_format", "-show_streams",
-                            "-of", "json", path], capture_output=True, timeout=60)
+        p = subprocess.run([tool("ffprobe"), "-v", "error", "-show_format", "-show_streams",
+                            "-of", "json", path], capture_output=True, timeout=60, **NO_WINDOW)
         data = json.loads(p.stdout.decode("utf-8", "replace") or "{}")
     except Exception:
         pass
@@ -1268,12 +1295,12 @@ def describe_cues(cues):
         c = [x for x in vis if x["kind"] == kind]
         return (c[-1] if last else c[0]) if c else None
     parts = []
-    for kind, text, last in (("in", "Mix in from %s", False), ("drop", "full energy at %s", False),
-                             ("out", "mix out from %s", False), ("end", "last beat %s", True)):
+    for kind, text, last in (("in", "Mix in %s", False), ("drop", "full energy %s", False),
+                             ("out", "mix out %s", False), ("end", "end %s", True)):
         c = pick(kind, last)
         if c:
             parts.append(text % fmt_time(c["t"]))
-    return "Mix points:  " + "   |   ".join(parts)
+    return "Mix points:  " + "  |  ".join(parts)
 
 
 class Player:
@@ -1290,15 +1317,16 @@ class Player:
 
     @staticmethod
     def available():
-        return shutil.which("ffplay") is not None
+        t = tool("ffplay")
+        return os.path.isfile(t) or shutil.which(t) is not None
 
     def play(self, path, pos=0.0):
         self.stop()
         pos = max(0.0, float(pos))
-        cmd = ["ffplay", "-nodisp", "-autoexit", "-hide_banner", "-loglevel", "info", "-stats",
+        cmd = [tool("ffplay"), "-nodisp", "-autoexit", "-hide_banner", "-loglevel", "info", "-stats",
                "-volume", str(int(self.volume)), "-ss", "%.3f" % pos, path]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.PIPE)
+                                     stderr=subprocess.PIPE, **NO_WINDOW)
         self.path, self.base, self.reported, self.paused_at = path, pos, None, None
         threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
 
@@ -1502,6 +1530,29 @@ def make_icon_images(size=18):
     done("info", im)
 
     return icons
+
+
+def make_app_icon(size=256):
+    """SongKey's own icon (window + .exe): green waveform bars on a dark rounded square."""
+    from PIL import Image, ImageDraw
+    S = 512
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle((16, 16, S - 16, S - 16), radius=96, fill=(30, 31, 36, 255),
+                        outline=(63, 191, 95, 255), width=14)
+    heights = (120, 230, 170, 330, 260, 380, 210, 290, 150, 230, 110)
+    n = len(heights)
+    bw = 26
+    gap = (S - 120 - n * bw) / (n - 1)
+    for i, h in enumerate(heights):
+        x = 60 + i * (bw + gap)
+        g = 150 + int(90 * h / 380)
+        d.rounded_rectangle((x, S / 2 - h / 2, x + bw, S / 2 + h / 2), radius=13, fill=(80, g, 110, 255))
+    try:
+        lanczos = Image.Resampling.LANCZOS
+    except AttributeError:
+        lanczos = Image.LANCZOS
+    return im.resize((size, size), lanczos)
 
 
 # ---------------------------------------------------------------------------
@@ -1785,7 +1836,7 @@ def run_gui(args):
             self.job = self.w.after(550, self.show)
 
         def show(self):
-            if self.tip is not None:
+            if self.tip is not None or not self.text:
                 return
             try:
                 x = self.w.winfo_rootx() + 12
@@ -1867,6 +1918,72 @@ def run_gui(args):
         if tip:
             Tooltip(b, tip)
         return b
+
+    # ------------------------------------------------------------------ LED VU meter
+    class VUMeter:
+        """Stereo LED meter: green -> yellow -> red, fast rise, smooth fall, peak-hold LED.
+        Levels are RMS (+3 dB, so a full-scale sine reads 0 dB) from the stored waveform data."""
+        SEGS = 18
+        LO, HI = -40.0, 0.0
+        FALL_DB_PER_S = 24.0
+        HOLD_S = 1.2
+
+        def __init__(self, parent, width=196, height=58):
+            self.c = tk.Canvas(parent, width=width, height=height, bg=PANEL, highlightthickness=0)
+            self.thr = np.linspace(self.LO, self.HI, self.SEGS + 1)[1:]     # dB needed to light each LED
+            x0, x1 = 18, width - 4
+            seg_w = (x1 - x0) / float(self.SEGS)
+            self.on_col, self.off_col = [], []
+            for t in self.thr:
+                if t > -4:
+                    on, off = "#ff4b3e", "#3a1b19"
+                elif t > -12:
+                    on, off = "#f5d33f", "#3a3519"
+                else:
+                    on, off = "#3fdc5a", "#163020"
+                self.on_col.append(on)
+                self.off_col.append(off)
+            self.rects = []
+            for ch, y in enumerate((5, 24)):
+                self.c.create_text(8, y + 7, text="LR"[ch], fill=DIM, font=("Helvetica", 9, "bold"))
+                row = []
+                for k in range(self.SEGS):
+                    xa = x0 + k * seg_w + 1
+                    row.append(self.c.create_rectangle(xa, y, xa + seg_w - 2, y + 14, outline="",
+                                                       fill=self.off_col[k]))
+                self.rects.append(row)
+            for db_mark in (-40, -20, -10, -4, 0):
+                x = x0 + (db_mark - self.LO) / (self.HI - self.LO) * (x1 - x0)
+                self.c.create_text(min(max(x, x0 + 6), x1 - 6), height - 6, text=str(db_mark), fill=DIM,
+                                   font=("Helvetica", 7))
+            self.level = [self.LO - 10] * 2
+            self.peak = [self.LO - 10] * 2
+            self.peak_t = [0.0, 0.0]
+            self.state = [[False] * self.SEGS for _ in range(2)]
+            self.peak_seg = [-1, -1]
+            self.last_t = time.monotonic()
+
+        def update(self, levels_db):
+            """levels_db: [left, right] in dB, or None when nothing is playing."""
+            now = time.monotonic()
+            dt = min(0.25, now - self.last_t)
+            self.last_t = now
+            for ch in range(2):
+                target = levels_db[ch] if levels_db else self.LO - 10
+                cur = self.level[ch]
+                cur = target if target > cur else max(target, cur - self.FALL_DB_PER_S * dt)
+                self.level[ch] = cur
+                if cur >= self.peak[ch] or now - self.peak_t[ch] > self.HOLD_S:
+                    if cur >= self.peak[ch]:
+                        self.peak_t[ch] = now
+                    self.peak[ch] = cur if cur >= self.peak[ch] else max(cur, self.peak[ch] - self.FALL_DB_PER_S * dt)
+                lit = int(np.searchsorted(self.thr, cur, side="right"))
+                pk = int(np.searchsorted(self.thr, self.peak[ch], side="right")) - 1
+                for k in range(self.SEGS):
+                    on = k < lit or k == pk
+                    if on != self.state[ch][k]:
+                        self.state[ch][k] = on
+                        self.c.itemconfigure(self.rects[ch][k], fill=self.on_col[k] if on else self.off_col[k])
 
     # ------------------------------------------------------------------ waveform
     WAVE_PEAK, WAVE_RMS, WAVE_BG = "#2e9e4f", "#8de89b", "#0e1210"
@@ -2767,6 +2884,7 @@ def run_gui(args):
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
             self.root.after(100, self.poll)
             self.root.after(120, self.tick)
+            self.root.after(150, self.vu_tick)
 
         # ---------------------------------------------------------- layout
         def _build(self):
@@ -2861,21 +2979,7 @@ def run_gui(args):
             top = ttk.Frame(pw, style="Panel.TFrame", padding=8)
             info = ttk.Frame(top, style="Panel.TFrame")
             info.pack(fill="x")
-            left = ttk.Frame(info, style="Panel.TFrame")
-            left.pack(side="left", fill="x", expand=True)
-            self.lbl_title = ttk.Label(left, text="Drop audio files anywhere in this window",
-                                       style="Title.TLabel")
-            self.lbl_title.pack(anchor="w")
-            self.lbl_sub = ttk.Label(left, text="", style="Dim.TLabel")
-            self.lbl_sub.pack(anchor="w")
-            self.lbl_bpm_txt = ttk.Label(left, text="", style="Panel.TLabel")
-            self.lbl_bpm_txt.pack(anchor="w", pady=(4, 0))
-            self.lbl_key_txt = ttk.Label(left, text="", style="Panel.TLabel")
-            self.lbl_key_txt.pack(anchor="w")
-            self.lbl_mix = ttk.Label(left, text="", style="Dim.TLabel")
-            self.lbl_mix.pack(anchor="w")
-            self.lbl_cues = ttk.Label(left, text="", style="Cue.TLabel")
-            self.lbl_cues.pack(anchor="w", pady=(2, 0))
+            # right column is packed FIRST so a long title can never push it off the window
             right = ttk.Frame(info, style="Panel.TFrame")
             right.pack(side="right", anchor="n")
             big = ttk.Frame(right, style="Panel.TFrame")
@@ -2886,14 +2990,38 @@ def run_gui(args):
             self.badge = tk.Label(big, text="--", font=("Helvetica", 26, "bold"), width=4,
                                   bg="#555555", fg="#111111", padx=6, pady=2)
             self.badge.pack(side="left", padx=(18, 4))
-            self.btn_main = icon_button(self, right, "Add to library", "add", self.main_button,
+            row2 = ttk.Frame(right, style="Panel.TFrame")
+            row2.pack(anchor="e", pady=(8, 0))
+            btns = ttk.Frame(row2, style="Panel.TFrame")
+            btns.pack(side="right")
+            self.btn_main = icon_button(self, btns, "Add to library", "add", self.main_button,
                                         style="Accent.TButton")
-            self.btn_main.pack(anchor="e", pady=(8, 0))
+            self.btn_main.pack(anchor="e")
             self.btn_main.state(["disabled"])
-            self.btn_tap = icon_button(self, right, "Tap BPM", "tap", self.open_tap,
+            self.btn_tap = icon_button(self, btns, "Tap BPM", "tap", self.open_tap,
                                        tip="Tap the tempo yourself while the song plays")
             self.btn_tap.pack(anchor="e", pady=(4, 0))
             self.btn_tap.state(["disabled"])
+            self.vu = VUMeter(row2)
+            self.vu.c.pack(side="right", padx=(0, 12))
+            Tooltip(self.vu.c, "Volume level while the song plays (L / R)")
+
+            left = ttk.Frame(info, style="Panel.TFrame")
+            left.pack(side="left", fill="x", expand=True)
+            self.lbl_title = ttk.Label(left, text="Drop audio files anywhere in this window",
+                                       style="Title.TLabel")
+            self.lbl_title.pack(anchor="w")
+            self._title_tip = Tooltip(self.lbl_title, "")
+            self.lbl_sub = ttk.Label(left, text="", style="Dim.TLabel")
+            self.lbl_sub.pack(anchor="w")
+            self.lbl_bpm_txt = ttk.Label(left, text="", style="Panel.TLabel")
+            self.lbl_bpm_txt.pack(anchor="w", pady=(4, 0))
+            self.lbl_key_txt = ttk.Label(left, text="", style="Panel.TLabel")
+            self.lbl_key_txt.pack(anchor="w")
+            self.lbl_mix = ttk.Label(left, text="", style="Dim.TLabel")
+            self.lbl_mix.pack(anchor="w")
+            self.lbl_cues = ttk.Label(left, text="", style="Cue.TLabel")
+            self.lbl_cues.pack(anchor="w", pady=(2, 0))
 
             tp = ttk.Frame(top, style="Panel.TFrame")
             tp.pack(side="bottom", fill="x", pady=(4, 0))
@@ -2971,9 +3099,22 @@ def run_gui(args):
             tkr = self.root.tk
             cands = []
             try:
+                import struct
                 import tkinterdnd2
                 base = os.path.join(os.path.dirname(tkinterdnd2.__file__), "tkdnd")
-                cands += [base] + glob.glob(os.path.join(base, "*"))
+                bits = struct.calcsize("P") * 8
+                mach = getattr(os, "uname", lambda: None)()
+                mach = mach.machine if mach else ""
+                if IS_WINDOWS:
+                    plat = "win-x64" if bits == 64 else "win-x86"
+                elif sys.platform == "darwin":
+                    plat = "osx-arm64" if mach == "arm64" else "osx-x64"
+                else:
+                    plat = "linux-arm64" if mach in ("aarch64", "arm64") else "linux-x64"
+                if os.path.isdir(os.path.join(base, plat)):
+                    cands.append(os.path.join(base, plat))      # only the variant for this platform
+                else:
+                    cands += [base] + glob.glob(os.path.join(base, "*"))
             except Exception:
                 pass
             for pat in ("/usr/lib/tkdnd*", "/usr/lib/tcltk/*/tkdnd*", "/usr/lib/tcltk/tkdnd*",
@@ -3063,7 +3204,9 @@ def run_gui(args):
                             rec["status"] = "ready - not in library"
                             self.session[rec["path"]] = rec
                             self.refresh_new()
-                            if not busy:
+                            # while music plays, don't let ANOTHER song take over the screen -
+                            # but the song already on screen always gets its results
+                            if not busy or self.current == ("new", rec["path"]):
                                 self.select(("new", rec["path"]))
                             if self.ask_each.get():
                                 self.ask_queue.append(rec["path"])
@@ -3073,7 +3216,7 @@ def run_gui(args):
                             rec["cues"] = merge_marks(parse_cues(old.get("cues")), rec.get("cues", []))
                             self.db.update_analysis(song_id, rec)
                             self.refresh_lib()
-                            if not busy:
+                            if not busy or self.current == ("lib", song_id):
                                 self.select(("lib", song_id))
                         self.last_done = "Done: %s  ->  %s BPM, %s (%s) in %ss" % (
                             rec["filename"], fmt_bpm(rec["bpm"]), rec["key_name"], rec["camelot"],
@@ -3392,8 +3535,8 @@ def run_gui(args):
             if len(sel) != 1:
                 return
             ref = ("new", sel[0]) if which == "new" else ("lib", int(sel[0]))
-            if ref != self.current:
-                self.show(ref)
+            if ref != self.current or not (self.view or {}).get("bpm"):
+                self.show(ref)                 # also refreshes a song still showing "working on it"
 
         def on_tab(self, _e=None):
             which = self.active_tab()
@@ -3470,6 +3613,7 @@ def run_gui(args):
             if r.get("artist"):
                 title = "%s  -  %s" % (r["artist"], title)
             self.lbl_title.configure(text=title)
+            self._title_tip.text = title
             sub = []
             if r.get("mix_name"):
                 s = r["mix_name"]
@@ -3657,6 +3801,25 @@ def run_gui(args):
                 if key != self._last_cursor:
                     self._blit_cursor(pos)
             self.root.after(80, self.tick)
+
+        def vu_tick(self):
+            levels = None
+            p = self.view_path()
+            pk = self.wave.peaks
+            if pk is not None and p and self.player.path == p and self.player.playing():
+                pos = self.player.position()
+                if pos is not None:
+                    i = int(pos * PEAK_RATE)
+                    a, b = max(0, i - 4), min(len(pk), i + 1)       # the last ~50 ms
+                    if b > a:
+                        rms = np.sqrt(((pk[a:b, :, 2].astype(np.float32) / 127.0) ** 2).mean(axis=0))
+                        db = 20 * np.log10(np.maximum(rms * 1.4142, 1e-5))
+                        levels = [float(db[0]), float(db[-1])]          # mono: both bars the same
+            try:
+                self.vu.update(levels)
+            except tk.TclError:
+                return
+            self.root.after(40, self.vu_tick)
 
         def _on_draw(self, _e=None):
             if self.ax_spec is not None:
@@ -3947,6 +4110,12 @@ def run_gui(args):
 
     root = tk.Tk()
     try:
+        from PIL import ImageTk
+        root._icon = ImageTk.PhotoImage(make_app_icon(64), master=root)
+        root.iconphoto(True, root._icon)
+    except Exception:
+        pass
+    try:
         root.app = App(root)
     except RuntimeError as e:
         root.withdraw()
@@ -3994,9 +4163,9 @@ def parse_range(s):
 
 
 def main():
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = APP_DIR
     ap = argparse.ArgumentParser(description="BPM + key detector with spectrum view and song library")
-    ap.add_argument("--db", default=os.path.join(here, "songs.db"), help="SQLite database file")
+    ap.add_argument("--db", default=default_db_path(), help="SQLite database file")
     ap.add_argument("--engine", choices=("builtin", "essentia"), default="builtin")
     ap.add_argument("--bpm-range", type=parse_range, default=(75.0, 180.0),
                     help="tempo range to fold results into (default 75-180)")
