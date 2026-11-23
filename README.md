@@ -1,4 +1,4 @@
-# SongKey
+# SongKey 1.0
 
 **Find the tempo (BPM) and musical key of your songs, see them as a waveform, and mark where to mix in and out.**
 A free, open-source desktop app for DJs, written in Python. Think of it as a free alternative to Mixed In Key.
