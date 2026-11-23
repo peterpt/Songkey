@@ -3,8 +3,9 @@
 **Find the tempo (BPM) and musical key of your songs, see them as a waveform, and mark where to mix in and out.**
 A free, open-source desktop app for DJs, written in Python. Think of it as a free alternative to Mixed In Key.
 
-<!-- Add your screenshots to a docs/ folder, or remove these lines -->
-<img width="1024" height="768" alt="image" src="https://github.com/user-attachments/assets/8c571034-6aaf-461b-9f9e-2a9de426cac8" />
+
+<img width="1024" height="741" alt="image" src="https://github.com/user-attachments/assets/59e02429-edb1-4f23-bbb5-50a63ded9eb2" />
+
 
 <img width="1974" height="703" alt="image" src="https://github.com/user-attachments/assets/d7ea57f0-3906-4bf4-a2c9-24a4168693d3" />
 
