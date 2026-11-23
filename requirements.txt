@@ -1,0 +1,22 @@
+# SongKey - Python packages
+#   pip3 install -r requirements.txt
+#
+# Also needed, but NOT installed by pip (use your system's package manager):
+#   - Tk for Python  (Debian/Ubuntu/Devuan: python3-tk)
+#   - FFmpeg         (ffmpeg, ffprobe and ffplay)
+#   - tkdnd          (optional, for drag & drop; Debian/Ubuntu/Devuan: tkdnd)
+#
+# Old CPUs without SSE4.2 (e.g. AMD Athlon II / Phenom): recent numpy wheels from pip
+# crash with "Illegal instruction" - install the packages from your distribution
+# instead (see README).
+
+numpy>=1.21
+scipy>=1.7
+matplotlib>=3.5
+Pillow>=8.2
+
+# Optional - drag & drop on systems without the tkdnd package:
+# tkinterdnd2
+
+# Optional - second analysis engine (see README before installing):
+# essentia
